@@ -24,6 +24,7 @@ import (
 // InterfaceSpec defines the desired state of Interface.
 type InterfaceSpec struct {
 	// DeviceRef references the Device in the same namespace this interface lives on.
+	// +kubebuilder:validation:XValidation:rule="self.name != ''",message="deviceRef.name must not be empty"
 	DeviceRef corev1.LocalObjectReference `json:"deviceRef"`
 
 	// Name is the interface name on the device (e.g. eth1).
