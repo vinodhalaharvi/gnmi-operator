@@ -17,29 +17,65 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // InterfaceSpec defines the desired state of Interface.
 type InterfaceSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// DeviceRef references the Device in the same namespace this interface lives on.
+	DeviceRef corev1.LocalObjectReference `json:"deviceRef"`
 
-	// Foo is an example field of Interface. Edit interface_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// Name is the interface name on the device (e.g. eth1).
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Enabled desired administrative state of the interface.
+	// A nil value means "do not manage" — distinct from an explicit false.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// MTU desired MTU in bytes.
+	// A nil value means "do not manage" — distinct from an explicit value.
+	// +kubebuilder:validation:Minimum=68
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	MTU *uint16 `json:"mtu,omitempty"`
+
+	// Description is a free-form description propagated to the interface.
+	// +optional
+	Description string `json:"description,omitempty"`
 }
 
 // InterfaceStatus defines the observed state of Interface.
 type InterfaceStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Conditions represent the latest observations of the Interface's state.
+	// +optional
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+
+	// ObservedMTU is the MTU last read from the device.
+	// +optional
+	ObservedMTU *uint16 `json:"observedMTU,omitempty"`
+
+	// ObservedEnabled is the administrative state last read from the device.
+	// +optional
+	ObservedEnabled *bool `json:"observedEnabled,omitempty"`
+
+	// LastSyncTime is the last time the operator successfully reconciled this interface.
+	// +optional
+	LastSyncTime *metav1.Time `json:"lastSyncTime,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Device",type=string,JSONPath=`.spec.deviceRef.name`
+// +kubebuilder:printcolumn:name="Name",type=string,JSONPath=`.spec.name`
+// +kubebuilder:printcolumn:name="MTU",type=integer,JSONPath=`.spec.mtu`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 
 // Interface is the Schema for the interfaces API.
 type Interface struct {

@@ -48,7 +48,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("dial %s: %v", *addr, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	client := gnmipb.NewGNMIClient(conn)
 
 	if err := capabilities(ctx, client, *verbose); err != nil {
@@ -91,7 +91,8 @@ func main() {
 	fmt.Printf("verified mtu = %d\n", after)
 
 	if after != uint64(*newMTU) {
-		fmt.Println("target accepted the Set but reports something else — this is exactly the case status conditions exist for")
+		fmt.Println("target accepted the Set but reports something else — " +
+			"this is exactly the case status conditions exist for")
 		os.Exit(1)
 	}
 }
