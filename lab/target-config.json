@@ -1,0 +1,7 @@
+{
+  "openconfig-interfaces:interfaces": {
+    "interface": [
+      { "name": "eth1", "config": { "name": "eth1", "mtu": 1500, "enabled": true } }
+    ]
+  }
+}
