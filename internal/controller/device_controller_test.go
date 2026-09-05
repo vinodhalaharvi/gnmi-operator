@@ -51,7 +51,9 @@ var _ = Describe("Device Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: networkv1alpha1.DeviceSpec{
+						Address: "10.0.0.1",
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
