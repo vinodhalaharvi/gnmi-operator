@@ -71,6 +71,9 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
+                x-kubernetes-validations:
+                - message: deviceRef.name must not be empty
+                  rule: self.name != ''
               enabled:
                 description: |-
                   Enabled desired administrative state of the interface.
