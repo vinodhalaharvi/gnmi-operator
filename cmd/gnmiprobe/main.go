@@ -1,27 +1,28 @@
 // Command gnmiprobe is the Phase 1 exercise: connect to a gNMI target, ask what
 // it supports, read one value, change it, and read it back.
 //
-// Everything here is built from raw protobuf structures on purpose. There are
-// convenience libraries that would collapse this file to about twenty lines,
-// and using one now would mean never learning what a SetRequest looks like.
+// The dial and TypedValue-decoding logic lives in internal/gnmi so the
+// reconcilers use the same code as this diagnostic. What stays here is the
+// flag surface, the human-readable prints, and the log.Fatalf failure mode
+// that only belongs in a main.
 package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
+	"strconv"
 	"time"
 
 	gnmipb "github.com/openconfig/gnmi/proto/gnmi"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/encoding/prototext"
+
+	networkv1alpha1 "github.com/vinodhalaharvi/gnmi-operator/api/v1alpha1"
+	"github.com/vinodhalaharvi/gnmi-operator/internal/gnmi"
 )
 
 func main() {
@@ -44,12 +45,35 @@ func main() {
 		ctx = metadata.AppendToOutgoingContext(ctx, "username", *user, "password", *pass)
 	}
 
-	conn, err := dial(*addr, *caFile, *hostname, *skipTLS)
+	host, portStr, err := net.SplitHostPort(*addr)
+	if err != nil {
+		log.Fatalf("parse target %q: %v", *addr, err)
+	}
+	port, err := strconv.ParseInt(portStr, 10, 32)
+	if err != nil {
+		log.Fatalf("parse port %q: %v", portStr, err)
+	}
+
+	spec := networkv1alpha1.DeviceSpec{
+		Address:    host,
+		Port:       int32(port),
+		Insecure:   *skipTLS,
+		ServerName: *hostname,
+	}
+
+	var caPEM []byte
+	if !*skipTLS {
+		caPEM, err = os.ReadFile(*caFile)
+		if err != nil {
+			log.Fatalf("read CA: %v", err)
+		}
+	}
+
+	client, err := gnmi.Dial(ctx, spec, caPEM)
 	if err != nil {
 		log.Fatalf("dial %s: %v", *addr, err)
 	}
-	defer func() { _ = conn.Close() }()
-	client := gnmipb.NewGNMIClient(conn)
+	defer func() { _ = client.Close() }()
 
 	if err := capabilities(ctx, client, *verbose); err != nil {
 		log.Fatalf("Capabilities: %v", err)
@@ -60,8 +84,8 @@ func main() {
 	// device reports. A well-behaved reconciler writes config and reads state,
 	// which is also why desired and observed can legitimately disagree for a
 	// while after a Set.
-	configPath := mtuPath(*iface, "config")
-	statePath := mtuPath(*iface, "state")
+	configPath := gnmi.InterfaceMTU(*iface, "config")
+	statePath := gnmi.InterfaceMTU(*iface, "state")
 
 	before, err := getMTU(ctx, client, statePath, *verbose)
 	if err != nil {
@@ -97,46 +121,8 @@ func main() {
 	}
 }
 
-// dial builds the gRPC channel. gNMI is TLS by default; plaintext is a lab-only
-// convenience and most real targets will refuse it.
-func dial(addr, caFile, hostname string, skip bool) (*grpc.ClientConn, error) {
-	if skip {
-		return grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	}
-	pem, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, fmt.Errorf("read CA: %w", err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("no certificates found in %s", caFile)
-	}
-	creds := credentials.NewTLS(&tls.Config{
-		RootCAs:    pool,
-		ServerName: hostname,
-		MinVersion: tls.VersionTLS12,
-	})
-	return grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
-}
-
-// mtuPath builds /interfaces/interface[name=X]/{config,state}/mtu.
-//
-// Note that the list key lives in PathElem.Key, not in the element name. The
-// bracket syntax you see in documentation is a display convention; on the wire
-// it is a map. Getting this wrong is the single most common early mistake.
-func mtuPath(iface, subtree string) *gnmipb.Path {
-	return &gnmipb.Path{
-		Elem: []*gnmipb.PathElem{
-			{Name: "interfaces"},
-			{Name: "interface", Key: map[string]string{"name": iface}},
-			{Name: subtree},
-			{Name: "mtu"},
-		},
-	}
-}
-
-func capabilities(ctx context.Context, c gnmipb.GNMIClient, verbose bool) error {
-	resp, err := c.Capabilities(ctx, &gnmipb.CapabilityRequest{})
+func capabilities(ctx context.Context, client *gnmi.Client, verbose bool) error {
+	resp, err := client.Raw().Capabilities(ctx, &gnmipb.CapabilityRequest{})
 	if err != nil {
 		return err
 	}
@@ -156,41 +142,35 @@ func capabilities(ctx context.Context, c gnmipb.GNMIClient, verbose bool) error 
 	return nil
 }
 
-func getMTU(ctx context.Context, c gnmipb.GNMIClient, p *gnmipb.Path, verbose bool) (uint64, error) {
+func getMTU(ctx context.Context, client *gnmi.Client, p *gnmipb.Path, verbose bool) (uint64, error) {
 	req := &gnmipb.GetRequest{
 		Path:     []*gnmipb.Path{p},
 		Type:     gnmipb.GetRequest_ALL,
 		Encoding: gnmipb.Encoding_JSON_IETF,
 	}
-	resp, err := c.Get(ctx, req)
+	resp, err := client.Raw().Get(ctx, req)
 	if err != nil {
 		return 0, err
 	}
 	if verbose {
 		fmt.Println(prototext.Format(resp))
 	}
-	// A GetResponse is a list of Notifications, each holding a list of Updates.
-	// Even a single-leaf read has this shape, which is a hint about how much
-	// normalisation a reconciler will eventually need.
 	for _, n := range resp.GetNotification() {
 		for _, u := range n.GetUpdate() {
-			return typedValueToUint(u.GetVal())
+			return gnmi.DecodeUint(u.GetVal())
 		}
 	}
 	return 0, fmt.Errorf("no update in response")
 }
 
-func setMTU(ctx context.Context, c gnmipb.GNMIClient, p *gnmipb.Path, mtu uint64, verbose bool) error {
-	// Update merges, Replace overwrites the subtree, Delete removes it. Update
-	// is the safe choice for a single leaf; Replace is what you reach for when
-	// you want the device to look exactly like your intent and nothing else.
+func setMTU(ctx context.Context, client *gnmi.Client, p *gnmipb.Path, mtu uint64, verbose bool) error {
 	req := &gnmipb.SetRequest{
 		Update: []*gnmipb.Update{{
 			Path: p,
 			Val:  &gnmipb.TypedValue{Value: &gnmipb.TypedValue_UintVal{UintVal: mtu}},
 		}},
 	}
-	resp, err := c.Set(ctx, req)
+	resp, err := client.Raw().Set(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -198,30 +178,4 @@ func setMTU(ctx context.Context, c gnmipb.GNMIClient, p *gnmipb.Path, mtu uint64
 		fmt.Println(prototext.Format(resp))
 	}
 	return nil
-}
-
-// typedValueToUint exists because targets disagree about how to encode an
-// integer leaf. Handling three cases here is not defensive programming; it is
-// the vendor-variance problem showing up on day one.
-func typedValueToUint(v *gnmipb.TypedValue) (uint64, error) {
-	switch t := v.GetValue().(type) {
-	case *gnmipb.TypedValue_UintVal:
-		return t.UintVal, nil
-	case *gnmipb.TypedValue_IntVal:
-		return uint64(t.IntVal), nil
-	case *gnmipb.TypedValue_JsonIetfVal:
-		var n uint64
-		if _, err := fmt.Sscanf(string(t.JsonIetfVal), "%d", &n); err != nil {
-			return 0, fmt.Errorf("json_ietf value %q is not an integer", t.JsonIetfVal)
-		}
-		return n, nil
-	case *gnmipb.TypedValue_JsonVal:
-		var n uint64
-		if _, err := fmt.Sscanf(string(t.JsonVal), "%d", &n); err != nil {
-			return 0, fmt.Errorf("json value %q is not an integer", t.JsonVal)
-		}
-		return n, nil
-	default:
-		return 0, fmt.Errorf("unexpected TypedValue type %T", t)
-	}
 }
